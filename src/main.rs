@@ -49,6 +49,7 @@ impl NowPlaying {
 struct MetadataHelper {
     metadata: Metadata,
 }
+
 impl MetadataHelper {
     pub fn new(metadata: Metadata) -> Self {
         Self { metadata }
@@ -116,8 +117,8 @@ fn main() {
         let finder = mpris::PlayerFinder::new().unwrap();
         let active_res = finder.find_active();
         if active_res.is_err() {
-            if drpc.clear_activity().is_err() {
-                warn!("Failed to clear status")
+            if let Err(e) = drpc.clear_activity() {
+                warn!("Failed to clear status: {e}")
             }
             continue;
         }
@@ -125,7 +126,10 @@ fn main() {
 
         let np_res: Result<NowPlaying, OxiError> = active.try_into();
         if let Err(e) = &np_res {
-            warn!("{e}")
+            // NowPlaying translation will sometimes fail when the user switches songs rapidly
+            // I do that a lot, apparently, so I decree this should not be fatal.
+            warn!("{e}");
+            continue
         }
         let np = np_res.unwrap();
         let message = match np.guess_type() {
@@ -144,8 +148,8 @@ fn main() {
                 .expect("Failed to set activity");
             }
             None => {
-                if drpc.clear_activity().is_err() {
-                    warn!("Failed to clear status")
+                if let Err(e) = drpc.clear_activity() {
+                    warn!("Failed to clear status: {e}")
                 }
             }
         };
