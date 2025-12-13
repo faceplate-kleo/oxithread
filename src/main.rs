@@ -10,83 +10,17 @@
 // Update: not that bad, actually.
 
 mod error;
+mod now_playing;
+mod status;
 
 use crate::error::OxiError;
+use crate::now_playing::{MediaType, NowPlaying};
+use crate::status::StatusTracker;
 use discord_presence::models::{ActivityType, DisplayType};
 use discord_presence::{Client, Event};
 use log::{debug, info, warn};
-use mpris::{Metadata, MetadataValueKind, Player};
 use std::thread::sleep;
 use std::time;
-
-#[derive(Debug, Clone)]
-struct NowPlaying {
-    title: String,
-    artist: Option<String>,
-    album: Option<String>,
-}
-
-enum MediaType {
-    Music,
-    Video,
-    Unknown,
-}
-
-impl NowPlaying {
-    pub fn guess_type(&self) -> MediaType {
-        let artist = self.artist.clone().unwrap_or_default();
-        let album = self.album.clone().unwrap_or_default();
-        if !artist.is_empty() && !album.is_empty() {
-            MediaType::Music
-        } else if !artist.is_empty() && album.is_empty() {
-            MediaType::Video
-        } else {
-            MediaType::Unknown
-        }
-    }
-}
-
-struct MetadataHelper {
-    metadata: Metadata,
-}
-
-impl MetadataHelper {
-    pub fn new(metadata: Metadata) -> Self {
-        Self { metadata }
-    }
-    pub fn get_attribute(&self, key: &str) -> Result<String, OxiError> {
-        if let Some(val) = self.metadata.get(key) {
-            return match val.kind() {
-                MetadataValueKind::String => Ok(val.clone().into_string().unwrap()),
-                MetadataValueKind::Array => {
-                    let as_arr = val.as_array().unwrap();
-                    Ok(as_arr
-                        .iter()
-                        .map(|v| v.as_string().unwrap().clone())
-                        .collect::<Vec<String>>()
-                        .join(","))
-                }
-                _ => Err(OxiError::Translation),
-            };
-        }
-        Err(OxiError::MissingMetadataField(key.to_string()))
-    }
-}
-
-impl TryFrom<Player> for NowPlaying {
-    type Error = OxiError;
-
-    fn try_from(value: Player) -> Result<Self, Self::Error> {
-        let metadata: Metadata = value.get_metadata()?;
-        debug!("{:?}", metadata);
-        let metadata_h = MetadataHelper::new(metadata);
-        Ok(Self {
-            title: metadata_h.get_attribute("xesam:title")?,
-            artist: metadata_h.get_attribute("xesam:artist").ok(),
-            album: metadata_h.get_attribute("xesam:album").ok(),
-        })
-    }
-}
 
 fn main() {
     env_logger::init();
@@ -111,6 +45,7 @@ fn main() {
         interval_ms as f32 / 1000.0
     );
 
+    let mut tracker = StatusTracker::new(None, None);
     // graceful shutdowns are for babies
     loop {
         sleep(time::Duration::from_millis(interval_ms));
@@ -124,14 +59,29 @@ fn main() {
         }
         let active = active_res.unwrap();
 
-        let np_res: Result<NowPlaying, OxiError> = active.try_into();
+        let np_res: Result<NowPlaying, OxiError> = (&active).try_into();
         if let Err(e) = &np_res {
             // NowPlaying translation will sometimes fail when the user switches songs rapidly
             // I do that a lot, apparently, so I decree this should not be fatal.
             warn!("{e}");
-            continue
+            continue;
         }
         let np = np_res.unwrap();
+
+        if let Some(tracker_np) = &tracker.now_playing
+            && tracker_np == &np
+        {
+            debug!("Media hasn't changed, continuing...");
+            continue;
+        }
+
+        tracker = StatusTracker::new(Some(np.clone()), Some(active));
+
+        // Timestamp stuff just seems way too unstable with Chromium
+        // It's probably fine with other media players, but I use Chromium. Sorry not sorry.
+        //
+        // let timestamp = StatusBar::try_from(&tracker).unwrap().time_status_as_string().unwrap_or("unknown timestamp".to_string());
+
         let message = match np.guess_type() {
             MediaType::Music => Some(format!("{} - {}", np.artist.unwrap_or_default(), np.title)),
             MediaType::Video => Some("Watching a video".to_string()),
@@ -141,9 +91,15 @@ fn main() {
         match message {
             Some(msg) => {
                 drpc.set_activity(|act| {
-                    act.state(msg)
-                        .status_display(DisplayType::State)
+                    act.details(msg)
+                        .state(np.album.unwrap_or("Unknown Album".to_string()))
+                        .append_buttons(|button| {
+                            button
+                                .label("DONT CLICK")
+                                .url("https://www.youtube.com/watch?v=E4WlUXrJgy4")
+                        })
                         .activity_type(ActivityType::Listening)
+                        .status_display(DisplayType::Details)
                 })
                 .expect("Failed to set activity");
             }
@@ -151,6 +107,7 @@ fn main() {
                 if let Err(e) = drpc.clear_activity() {
                     warn!("Failed to clear status: {e}")
                 }
+                tracker.now_playing = None;
             }
         };
     }
