@@ -10,4 +10,7 @@ pub enum OxiError {
 
     #[error("Failed DBus connection: {0}")]
     DBus(#[from] mpris::DBusError),
+
+    #[error("Attempted to create status bar while nothing is playing")]
+    _StatusBarCoercion,
 }
