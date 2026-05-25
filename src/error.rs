@@ -8,6 +8,7 @@ pub enum OxiError {
     #[error("Missing metadata field {0}")]
     MissingMetadataField(String),
 
+    #[cfg(target_os = "linux")]
     #[error("Failed DBus connection: {0}")]
     DBus(#[from] mpris::DBusError),
 
