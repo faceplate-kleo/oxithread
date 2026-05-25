@@ -14,15 +14,19 @@ mod now_playing;
 mod status;
 
 use crate::error::OxiError;
+
 use crate::now_playing::{MediaType, NowPlaying};
+
 use crate::status::StatusTracker;
 use discord_presence::models::{ActivityType, DisplayType};
 use discord_presence::{Client, Event};
 use log::{debug, info, warn};
 use std::thread::sleep;
 use std::time;
+use windows::Media::Control::{GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
     let id: u64 = 1447306598555844844; // This isn't a secret, though it kinda feels like one
 
@@ -45,28 +49,45 @@ fn main() {
         interval_ms as f32 / 1000.0
     );
 
+    #[cfg(target_os = "windows")]
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().unwrap().await.unwrap();
+
     let mut tracker = StatusTracker::new(None, None);
     // graceful shutdowns are for babies
     loop {
         sleep(time::Duration::from_millis(interval_ms));
-        let finder = mpris::PlayerFinder::new().unwrap();
-        let active_res = finder.find_active();
-        if active_res.is_err() {
-            if let Err(e) = drpc.clear_activity() {
-                warn!("Failed to clear status: {e}")
-            }
-            continue;
-        }
-        let active = active_res.unwrap();
 
-        let np_res: Result<NowPlaying, OxiError> = (&active).try_into();
+        #[cfg(target_os = "linux")]
+        let np_res: Result<NowPlaying, OxiError> = {
+            let finder = mpris::PlayerFinder::new().unwrap();
+            let active_res = finder.find_active();
+            if active_res.is_err() {
+                if let Err(e) = drpc.clear_activity() {
+                    warn!("Failed to clear status: {e}")
+                }
+                continue;
+            }
+            let active = active_res.unwrap()
+            (&active).try_into();
+        };
+
+        #[cfg(target_os = "windows")]
+        let np_res: Result<(NowPlaying, GlobalSystemMediaTransportControlsSession), OxiError> = {
+            let session = manager.GetCurrentSession().unwrap();
+            Ok((NowPlaying::from_session(&session).await.unwrap(), session))
+        };
+
         if let Err(e) = &np_res {
             // NowPlaying translation will sometimes fail when the user switches songs rapidly
             // I do that a lot, apparently, so I decree this should not be fatal.
             warn!("{e}");
             continue;
         }
-        let np = np_res.unwrap();
+        let np_tup = np_res.unwrap();
+
+        let np = np_tup.0;
+        let active = np_tup.1;
+
 
         if let Some(tracker_np) = &tracker.now_playing
             && tracker_np == &np
